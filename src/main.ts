@@ -206,6 +206,20 @@ export default class AtomicSyncPlugin extends Plugin {
             // Only reconfigure if we're still on the same file
             const currentFile = this.app.workspace.getActiveFile();
             if (currentFile?.path === file.path) {
+                // First, sync Y.Doc content to editor if they differ
+                const currentEditorContent = editorView.state.doc.toString();
+                if (finalContent.length > 0 && currentEditorContent !== finalContent) {
+                    console.log(`📝 Syncing Y.Doc content (${finalContent.length} chars) to editor (currently ${currentEditorContent.length} chars)`);
+                    editorView.dispatch({
+                        changes: {
+                            from: 0,
+                            to: editorView.state.doc.length,
+                            insert: finalContent
+                        }
+                    });
+                }
+                
+                // Then configure yCollab
                 editorView.dispatch({
                     effects: this.collabCompartment.reconfigure(
                         yCollab(ytext, provider.awareness)
