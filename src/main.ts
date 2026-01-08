@@ -234,6 +234,97 @@ export default class AtomicSyncPlugin extends Plugin {
         }
     }
 
+    async fetchFileContent(filePath: string): Promise<string> {
+        try {
+            // Get document ID
+            const { data: docData, error: docError } = await this.supabase
+                .from('documents')
+                .select('id')
+                .eq('path', filePath)
+                .maybeSingle();
+
+            if (docError || !docData) {
+                console.log(`No document found in Supabase for ${filePath}`);
+                return '';
+            }
+
+            // Fetch updates
+            const { data: updates, error: updatesError } = await this.supabase
+                .from('updates')
+                .select('update_blob')
+                .eq('document_id', docData.id)
+                .order('created_at', { ascending: true });
+
+            if (updatesError || !updates || updates.length === 0) {
+                console.log(`No updates found for ${filePath}`);
+                return '';
+            }
+
+            console.log(`Fetching ${updates.length} updates for ${filePath}`);
+
+            // Create temporary Y.Doc to reconstruct content
+            const tempDoc = new Y.Doc();
+            const tempText = tempDoc.getText('codemirror');
+
+            // Derive encryption key
+            const encryptionKey = await this.deriveEncryptionKey();
+            if (!encryptionKey) {
+                console.error('No encryption key available');
+                return '';
+            }
+
+            // Process and apply updates
+            for (const row of updates) {
+                try {
+                    // Decode base64
+                    let blob: Uint8Array;
+                    if (typeof row.update_blob === 'string') {
+                        const binaryString = atob(row.update_blob);
+                        blob = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) {
+                            blob[i] = binaryString.charCodeAt(i);
+                        }
+                    } else {
+                        blob = new Uint8Array(row.update_blob);
+                    }
+
+                    // Decrypt
+                    if (blob.length < 12) continue;
+                    
+                    const iv = blob.slice(0, 12);
+                    const ciphertext = blob.slice(12);
+                    
+                    // Import decrypt function
+                    const { decrypt } = await import('./encryption');
+                    const decrypted = await decrypt(ciphertext, iv, encryptionKey);
+                    
+                    // Apply update
+                    Y.applyUpdate(tempDoc, decrypted);
+                } catch (e) {
+                    console.error('Failed to process update:', e);
+                }
+            }
+
+            // Extract text content
+            const content = tempText.toString();
+            console.log(`Extracted ${content.length} characters from ${filePath}`);
+            
+            return content;
+        } catch (error) {
+            console.error(`Error fetching content for ${filePath}:`, error);
+            return '';
+        }
+    }
+
+    async deriveEncryptionKey(): Promise<CryptoKey | null> {
+        if (!this.settings.vaultPassword) {
+            return null;
+        }
+        
+        const { deriveKey } = await import('./encryption');
+        return await deriveKey(this.settings.vaultPassword);
+    }
+
     async discoverAndSyncFiles(showNotification = true) {
         if (!this.supabase) {
             console.log('Supabase not initialized');
@@ -275,16 +366,22 @@ export default class AtomicSyncPlugin extends Plugin {
                 const file = this.app.vault.getAbstractFileByPath(filePath);
                 
                 if (!file) {
-                    // File doesn't exist locally, create it
+                    // File doesn't exist locally, create it with content from Supabase
                     try {
                         console.log(`📥 Creating missing file: ${filePath}`);
                         
-                        // Create the file with placeholder content
-                        // The actual content will sync when the file is opened
-                        await this.app.vault.create(filePath, '');
+                        // Fetch content from Supabase
+                        const content = await this.fetchFileContent(filePath);
+                        
+                        // Create the file with the fetched content
+                        await this.app.vault.create(filePath, content);
                         
                         createdCount++;
                         newFiles.push(filePath);
+                        
+                        if (content.length > 0) {
+                            console.log(`  ✓ Created with ${content.length} characters`);
+                        }
                     } catch (createError) {
                         console.error(`Failed to create file ${filePath}:`, createError);
                     }
