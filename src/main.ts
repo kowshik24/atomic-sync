@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf, TFile, MarkdownView } from 'obsidian';
+import { Plugin, WorkspaceLeaf, TFile, MarkdownView, Notice } from 'obsidian';
 import { SupabaseProvider } from './provider';
 import { AtomicSyncSettings, DEFAULT_SETTINGS, AtomicSyncSettingTab } from './settings';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -28,6 +28,22 @@ export default class AtomicSyncPlugin extends Plugin {
         if (this.settings.supabaseUrl && this.settings.supabaseKey) {
             this.initSupabase();
         }
+
+        // Add force-sync command
+        this.addCommand({
+            id: 'force-sync-current-file',
+            name: 'Force sync current file',
+            checkCallback: (checking: boolean) => {
+                const file = this.app.workspace.getActiveFile();
+                if (file) {
+                    if (!checking) {
+                        this.forceSyncCurrentFile();
+                    }
+                    return true;
+                }
+                return false;
+            }
+        });
 
         // Register the compartment
         this.registerEditorExtension(this.collabCompartment.of([]));
@@ -158,12 +174,38 @@ export default class AtomicSyncPlugin extends Plugin {
                     )
                 });
                 console.log(`✅ Sync enabled for ${file.path}`);
+                
+                // Show status notification
+                new Notice(`✅ ${file.name} - Sync enabled`, 2000);
             }
         } catch (error) {
             console.error(`❌ Failed to setup sync for ${file.path}:`, error);
         } finally {
             // Remove from pending
             this.pendingConnections.delete(file.path);
+        }
+    }
+
+    async forceSyncCurrentFile() {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) {
+            new Notice('❌ No active file to sync');
+            return;
+        }
+
+        const provider = this.providers.get(file.path);
+        if (!provider) {
+            new Notice('❌ File is not connected to sync');
+            return;
+        }
+
+        try {
+            new Notice(`🔄 Force syncing ${file.name}...`);
+            await provider.provider.forceSync();
+            new Notice(`✅ Successfully synced ${file.name}`);
+        } catch (error) {
+            console.error('Force sync failed:', error);
+            new Notice(`❌ Failed to sync ${file.name}`);
         }
     }
 

@@ -164,6 +164,20 @@ export class SupabaseProvider {
             }
         } else {
             console.log(`📭 No updates found in Supabase for ${this.path}`);
+            
+            // Auto-initialize: If no updates exist in Supabase but Y.Doc has content,
+            // push it as the first update
+            const currentContent = this.doc.getText('codemirror').toString();
+            if (currentContent.length > 0) {
+                console.log(`📤 Auto-initializing: Pushing ${currentContent.length} characters to Supabase`);
+                // Create an update from the current state
+                const stateVector = Y.encodeStateVector(this.doc);
+                const update = Y.encodeStateAsUpdate(this.doc, stateVector);
+                
+                // Push it to Supabase (this will trigger handleUpdate via the update event)
+                // But we need to do it manually here to avoid the 'remote' origin check
+                await this.pushUpdate(update);
+            }
         }
 
         this.isLoaded = true;
@@ -172,7 +186,10 @@ export class SupabaseProvider {
 
     async handleUpdate(update: Uint8Array, origin: any) {
         if (origin === 'remote') return; // Don't push back what we just pulled
+        await this.pushUpdate(update);
+    }
 
+    async pushUpdate(update: Uint8Array) {
         // 1. Encrypt
         let blobToSend: Uint8Array;
         if (this.encryptionKey) {
@@ -186,7 +203,7 @@ export class SupabaseProvider {
                 console.error("Encryption failed:", e);
                 console.error("Update size:", update.length);
                 console.error("Key exists:", !!this.encryptionKey);
-                return; // Don't send if encryption fails
+                throw e; // Throw to propagate error
             }
         } else {
             blobToSend = update;
@@ -198,7 +215,7 @@ export class SupabaseProvider {
             const { data: docData, error } = await this.supabase.from('documents').select('id').eq('path', this.path).single();
             if (error || !docData) {
                 console.error("Failed to get document ID:", error);
-                return;
+                throw error;
             }
 
             // Convert Uint8Array to Base64 string for simple, reliable transport
@@ -212,11 +229,28 @@ export class SupabaseProvider {
 
             if (insertError) {
                 console.error("Failed to insert update:", insertError);
+                throw insertError;
             } else {
                 console.log("✅ Update saved to Supabase");
             }
         } catch (e) {
-            console.error("Error in handleUpdate:", e);
+            console.error("Error pushing update:", e);
+            throw e;
+        }
+    }
+
+    // Force sync: Push current state to Supabase
+    async forceSync(): Promise<void> {
+        console.log(`🔄 Force syncing ${this.path}...`);
+        
+        const stateVector = Y.encodeStateVector(this.doc);
+        const update = Y.encodeStateAsUpdate(this.doc, stateVector);
+        
+        if (update.length > 0) {
+            await this.pushUpdate(update);
+            console.log(`✅ Force sync completed for ${this.path}`);
+        } else {
+            console.log(`⚠️ No content to sync for ${this.path}`);
         }
     }
 
