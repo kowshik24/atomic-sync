@@ -11,6 +11,11 @@ export class SupabaseProvider {
     channel: any;
     encryptionKey: CryptoKey | null = null;
     isLoaded: boolean = false;
+    
+    // Debounce updates to avoid flooding Supabase
+    private updateQueue: Uint8Array[] = [];
+    private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    private readonly DEBOUNCE_MS = 500; // Wait 500ms after last keystroke
 
     constructor(doc: Y.Doc, supabase: SupabaseClient, path: string, password?: string) {
         this.doc = doc;
@@ -76,6 +81,9 @@ export class SupabaseProvider {
             }
             docId = newDoc.id;
         }
+        
+        // Cache the docId for realtime subscription filtering
+        this.docIdCached = docId;
 
         // 2. Fetch Updates
         const { data: updates, error: updatesError } = await this.supabase
@@ -183,8 +191,33 @@ export class SupabaseProvider {
     }
 
     async handleUpdate(update: Uint8Array, origin: any) {
-        if (origin === 'remote') return; // Don't push back what we just pulled
-        await this.pushUpdate(update);
+        if (origin === 'remote') {
+            return; // Don't push back what we just pulled
+        }
+        
+        // Add update to queue
+        this.updateQueue.push(update);
+        
+        // Debounce: wait for typing to stop before pushing
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+        }
+        
+        this.debounceTimer = setTimeout(async () => {
+            if (this.updateQueue.length === 0) return;
+            
+            console.log(`📤 Pushing ${this.updateQueue.length} update(s) for ${this.path}...`);
+            
+            // Merge all queued updates into one
+            const mergedUpdate = Y.mergeUpdates(this.updateQueue);
+            this.updateQueue = [];
+            
+            try {
+                await this.pushUpdate(mergedUpdate);
+            } catch (e) {
+                console.error(`❌ Failed to push update for ${this.path}:`, e);
+            }
+        }, this.DEBOUNCE_MS);
     }
 
     async pushUpdate(update: Uint8Array) {
@@ -254,35 +287,37 @@ export class SupabaseProvider {
     }
 
     subscribe() {
+        console.log(`📡 Setting up realtime subscription for ${this.path}`);
+        
         this.channel = this.supabase
             .channel(`doc:${this.path}`)
             .on('postgres_changes', {
                 event: 'INSERT',
                 schema: 'public',
                 table: 'updates',
-                // filter: `document_id=eq.${docId}` // Hard to get docId here cleanly without waiting. 
-                // We can filter by verifying the document path via a join, but Realtime doesn't do joins.
-                // Instead, we will fetch the new row, check if it belongs to our doc (we can cache docId).
             }, async (payload) => {
-                // We need to check if this update belongs to OUR document.
-                // The payload contains the new row.
-                // But the row only has `document_id`.
-
-                // Optimization: Store docId in class property.
+                console.log(`📨 Received realtime event for updates table`);
+                
+                // Check if this update belongs to OUR document
                 if (!this.docIdCached) {
+                    console.warn(`⚠️ docIdCached not set, fetching...`);
                     const { data } = await this.supabase.from('documents').select('id').eq('path', this.path).single();
                     this.docIdCached = data?.id;
                 }
 
-                if (payload.new.document_id !== this.docIdCached) return;
+                if (payload.new.document_id !== this.docIdCached) {
+                    console.log(`⏭️ Update is for different document, ignoring`);
+                    return;
+                }
 
+                console.log(`📥 Realtime update received for ${this.path}`);
+                
                 // It's for us!
                 let blob = payload.new.update_blob;
 
                 // DATA IS BASE64 STRING
                 let binaryData: Uint8Array;
                 try {
-                    // Check if it's already a string (Supabase returns text column as string)
                     if (typeof blob !== 'string') {
                         console.warn("Unexpected blob type:", typeof blob);
                         return;
@@ -305,18 +340,23 @@ export class SupabaseProvider {
                         const ciphertext = binaryData.slice(12);
                         const decrypted = await decrypt(ciphertext, iv, this.encryptionKey);
                         Y.applyUpdate(this.doc, decrypted, 'remote');
-                        console.log("✅ Realtime update applied");
+                        console.log(`✅ Realtime update applied for ${this.path}`);
                     } catch (e) {
                         console.error("❌ Realtime decryption failed:", e);
                     }
                 } else {
-                    // No encryption, apply directly
                     Y.applyUpdate(this.doc, binaryData, 'remote');
-                    console.log("✅ Realtime update applied (unencrypted)");
+                    console.log(`✅ Realtime update applied (unencrypted) for ${this.path}`);
                 }
-
             })
-            .subscribe();
+            .subscribe((status) => {
+                console.log(`📡 Realtime subscription status for ${this.path}: ${status}`);
+                if (status === 'SUBSCRIBED') {
+                    console.log(`✅ Realtime connected for ${this.path}`);
+                } else if (status === 'CHANNEL_ERROR') {
+                    console.error(`❌ Realtime subscription failed for ${this.path}`);
+                }
+            });
     }
 
     docIdCached: string | null = null;
@@ -331,6 +371,20 @@ export class SupabaseProvider {
     }
 
     destroy() {
+        // Clear debounce timer
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+            this.debounceTimer = null;
+        }
+        
+        // Flush any remaining updates before destroying
+        if (this.updateQueue.length > 0) {
+            console.log(`⚠️ Flushing ${this.updateQueue.length} pending update(s) for ${this.path}`);
+            const mergedUpdate = Y.mergeUpdates(this.updateQueue);
+            this.pushUpdate(mergedUpdate).catch(e => console.error('Failed to flush updates:', e));
+            this.updateQueue = [];
+        }
+        
         if (this.channel) this.supabase.removeChannel(this.channel);
         this.awareness.destroy();
         this.doc.destroy();
