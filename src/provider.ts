@@ -132,36 +132,47 @@ export class SupabaseProvider {
         // 1. Encrypt
         let blobToSend: Uint8Array;
         if (this.encryptionKey) {
-            const { iv, content } = await encrypt(update, this.encryptionKey);
-            // Concatenate IV + Content
-            blobToSend = new Uint8Array(iv.length + content.length);
-            blobToSend.set(iv);
-            blobToSend.set(content, iv.length);
+            try {
+                const { iv, content } = await encrypt(update, this.encryptionKey);
+                // Concatenate IV + Content
+                blobToSend = new Uint8Array(iv.length + content.length);
+                blobToSend.set(iv);
+                blobToSend.set(content, iv.length);
+            } catch (e) {
+                console.error("Encryption failed:", e);
+                console.error("Update size:", update.length);
+                console.error("Key exists:", !!this.encryptionKey);
+                return; // Don't send if encryption fails
+            }
         } else {
             blobToSend = update;
         }
 
         // 2. Push to Supabase
-        // We need the docId. Ideally we cache it.
-        const { data: docData } = await this.supabase.from('documents').select('id').eq('path', this.path).single();
-        if (!docData) return;
+        try {
+            // We need the docId. Ideally we cache it.
+            const { data: docData, error } = await this.supabase.from('documents').select('id').eq('path', this.path).single();
+            if (error || !docData) {
+                console.error("Failed to get document ID:", error);
+                return;
+            }
 
-        // Convert Uint8Array to Hex string for postgres bytea if needed, or send as Blob/ArrayBuffer
-        // supabase-js usually handles ArrayBuffer/Uint8Array fine for bytea columns? 
-        // Actually, it might accept it, but for consistent serialization let's use Array.from or similar if it complains.
-        // Let's try sending standard Uint8Array first.
+            // Convert Uint8Array to Hex string for postgres bytea
+            const hexBlob = '0x' + Array.from(blobToSend).map(b => b.toString(16).padStart(2, '0')).join('');
 
-        // Wait, sending binary via JSON payload can be tricky.
-        // It's safer to convert to Hex string or Base64?
-        // Postgres `bytea` expects hex format `\x...` in SQL, but via API... 
-        // Supabase JS client handles this if we pass a standard format.
-        // Let's convert to Hex string to be safe and deterministic.
-        const hexBlob = '0x' + Array.from(blobToSend).map(b => b.toString(16).padStart(2, '0')).join('');
+            const { error: insertError } = await this.supabase.from('updates').insert({
+                document_id: docData.id,
+                update_blob: hexBlob
+            });
 
-        await this.supabase.from('updates').insert({
-            document_id: docData.id,
-            update_blob: hexBlob
-        });
+            if (insertError) {
+                console.error("Failed to insert update:", insertError);
+            } else {
+                console.log("✅ Update saved to Supabase");
+            }
+        } catch (e) {
+            console.error("Error in handleUpdate:", e);
+        }
     }
 
     subscribe() {
