@@ -16,6 +16,8 @@ export default class AtomicSyncPlugin extends Plugin {
     providers = new Map<string, { provider: SupabaseProvider, persistence: IndexeddbPersistence, editorView: EditorView }>();
     // Track pending connections to prevent duplicates
     pendingConnections = new Set<string>();
+    // Background sync interval
+    syncInterval: number | null = null;
 
     async onload() {
         console.log('Loading Atomic Sync plugin');
@@ -45,6 +47,15 @@ export default class AtomicSyncPlugin extends Plugin {
             }
         });
 
+        // Add sync all files command
+        this.addCommand({
+            id: 'sync-all-files',
+            name: 'Sync all files from Supabase',
+            callback: () => {
+                this.discoverAndSyncFiles(true);
+            }
+        });
+
         // Register the compartment
         this.registerEditorExtension(this.collabCompartment.of([]));
 
@@ -65,6 +76,20 @@ export default class AtomicSyncPlugin extends Plugin {
                 this.cleanupProvider(oldPath);
             })
         );
+
+        // Start background sync if Supabase is initialized
+        if (this.supabase) {
+            // Initial sync on startup
+            this.discoverAndSyncFiles(false);
+            
+            // Background sync every 60 seconds
+            this.syncInterval = window.setInterval(() => {
+                this.discoverAndSyncFiles(false);
+            }, 60000); // 60 seconds
+            
+            this.registerInterval(this.syncInterval);
+            console.log('🔄 Background file sync enabled (every 60 seconds)');
+        }
     }
 
     initSupabase() {
@@ -209,6 +234,84 @@ export default class AtomicSyncPlugin extends Plugin {
         }
     }
 
+    async discoverAndSyncFiles(showNotification = true) {
+        if (!this.supabase) {
+            console.log('Supabase not initialized');
+            return;
+        }
+
+        try {
+            console.log('🔍 Discovering files from Supabase...');
+            
+            // Fetch all documents from Supabase
+            const { data: documents, error } = await this.supabase
+                .from('documents')
+                .select('path')
+                .order('last_updated', { ascending: false });
+
+            if (error) {
+                console.error('Failed to fetch documents:', error);
+                if (showNotification) {
+                    new Notice('❌ Failed to discover files from Supabase');
+                }
+                return;
+            }
+
+            if (!documents || documents.length === 0) {
+                console.log('No documents found in Supabase');
+                return;
+            }
+
+            console.log(`Found ${documents.length} documents in Supabase`);
+
+            let createdCount = 0;
+            const newFiles: string[] = [];
+
+            // Check each document and create if missing
+            for (const doc of documents) {
+                const filePath = doc.path;
+                
+                // Check if file exists locally
+                const file = this.app.vault.getAbstractFileByPath(filePath);
+                
+                if (!file) {
+                    // File doesn't exist locally, create it
+                    try {
+                        console.log(`📥 Creating missing file: ${filePath}`);
+                        
+                        // Create the file with placeholder content
+                        // The actual content will sync when the file is opened
+                        await this.app.vault.create(filePath, '');
+                        
+                        createdCount++;
+                        newFiles.push(filePath);
+                    } catch (createError) {
+                        console.error(`Failed to create file ${filePath}:`, createError);
+                    }
+                }
+            }
+
+            if (createdCount > 0) {
+                console.log(`✅ Created ${createdCount} new file(s)`);
+                if (showNotification) {
+                    new Notice(`📥 Synced ${createdCount} new file(s) from Supabase`);
+                    // List the files in console
+                    newFiles.forEach(file => console.log(`  - ${file}`));
+                }
+            } else {
+                console.log('✅ All files are up to date');
+                if (showNotification) {
+                    new Notice('✅ All files are in sync');
+                }
+            }
+        } catch (error) {
+            console.error('Error discovering files:', error);
+            if (showNotification) {
+                new Notice('❌ Error discovering files');
+            }
+        }
+    }
+
     cleanupProvider(filePath: string) {
         const existing = this.providers.get(filePath);
         if (existing) {
@@ -221,6 +324,12 @@ export default class AtomicSyncPlugin extends Plugin {
 
     onunload() {
         console.log('Unloading Atomic Sync plugin');
+        
+        // Stop background sync
+        if (this.syncInterval) {
+            window.clearInterval(this.syncInterval);
+            this.syncInterval = null;
+        }
         
         // Cleanup all providers
         for (const [path, { provider, persistence }] of this.providers.entries()) {
