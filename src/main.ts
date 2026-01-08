@@ -152,9 +152,9 @@ export default class AtomicSyncPlugin extends Plugin {
             const ydoc = new Y.Doc();
             const ytext = ydoc.getText('codemirror');
 
-            // Get current editor content
-            const currentContent = editorView.state.doc.toString();
-            console.log(`📄 Current editor content length: ${currentContent.length} characters`);
+            // Get current file content from vault (not editor, as editor may not be loaded yet)
+            const fileContent = await this.app.vault.read(file);
+            console.log(`📄 File content from vault: ${fileContent.length} characters`);
 
             // 1. Connect Persistence (Offline support)
             const persistence = new IndexeddbPersistence(file.path, ydoc);
@@ -175,10 +175,10 @@ export default class AtomicSyncPlugin extends Plugin {
             const ydocContentAfterIDB = ytext.toString();
             console.log(`📄 Y.Doc content after IndexedDB: ${ydocContentAfterIDB.length} characters`);
 
-            // If Y.Doc is empty but editor has content, initialize Y.Doc with editor content
-            if (ydocContentAfterIDB.length === 0 && currentContent.length > 0) {
-                console.log(`📝 Initializing Y.Doc with current editor content`);
-                ytext.insert(0, currentContent);
+            // If Y.Doc is empty but file has content, initialize Y.Doc with file content
+            if (ydocContentAfterIDB.length === 0 && fileContent.length > 0) {
+                console.log(`📝 Initializing Y.Doc with file content (${fileContent.length} chars)`);
+                ytext.insert(0, fileContent);
             }
 
             // 2. Connect Provider (Cloud support)
