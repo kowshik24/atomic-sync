@@ -12,8 +12,10 @@ export default class AtomicSyncPlugin extends Plugin {
     settings: AtomicSyncSettings;
     supabase: SupabaseClient;
     collabCompartment = new Compartment();
-    // Keep track of active connections
-    providers = new WeakMap<EditorView, { provider: SupabaseProvider, persistence: IndexeddbPersistence }>();
+    // Keep track of active connections by file path
+    providers = new Map<string, { provider: SupabaseProvider, persistence: IndexeddbPersistence, editorView: EditorView }>();
+    // Track pending connections to prevent duplicates
+    pendingConnections = new Set<string>();
 
     async onload() {
         console.log('Loading Atomic Sync plugin');
@@ -34,6 +36,19 @@ export default class AtomicSyncPlugin extends Plugin {
         this.registerEvent(
             this.app.workspace.on('file-open', this.handleFileOpen.bind(this))
         );
+        
+        // Cleanup providers when file is closed/modified externally
+        this.registerEvent(
+            this.app.vault.on('delete', (file) => {
+                this.cleanupProvider(file.path);
+            })
+        );
+        
+        this.registerEvent(
+            this.app.vault.on('rename', (file, oldPath) => {
+                this.cleanupProvider(oldPath);
+            })
+        );
     }
 
     initSupabase() {
@@ -51,6 +66,19 @@ export default class AtomicSyncPlugin extends Plugin {
 
     async handleFileOpen(file: TFile | null) {
         if (!file) return;
+        
+        // Prevent duplicate connections for the same file
+        if (this.pendingConnections.has(file.path)) {
+            console.log(`⏳ Connection already pending for ${file.path}, skipping...`);
+            return;
+        }
+        
+        // Check if we already have a provider for this file
+        const existing = this.providers.get(file.path);
+        if (existing) {
+            console.log(`✅ Reusing existing connection for ${file.path}`);
+            return;
+        }
 
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view) return;
@@ -58,37 +86,88 @@ export default class AtomicSyncPlugin extends Plugin {
         const editorView = (view.editor as any).cm as EditorView;
         if (!editorView) return;
 
-        // Cleanup old
-        const old = this.providers.get(editorView);
-        if (old) {
-            old.provider.destroy();
-            old.persistence.destroy();
-            this.providers.delete(editorView);
-        }
-
         if (!this.supabase || !this.settings.vaultPassword) return;
 
-        // Initialize Yjs
-        const ydoc = new Y.Doc();
-        const ytext = ydoc.getText('codemirror');
+        // Mark as pending
+        this.pendingConnections.add(file.path);
+        
+        try {
+            console.log(`🔄 Setting up sync for ${file.path}`);
+            
+            // Initialize Yjs
+            const ydoc = new Y.Doc();
+            const ytext = ydoc.getText('codemirror');
 
-        // 1. Connect Persistence (Offline support)
-        const persistence = new IndexeddbPersistence(file.path, ydoc);
+            // 1. Connect Persistence (Offline support)
+            const persistence = new IndexeddbPersistence(file.path, ydoc);
+            
+            // Wait for persistence to be ready
+            await new Promise<void>((resolve) => {
+                if (persistence.synced) {
+                    resolve();
+                } else {
+                    persistence.once('synced', () => resolve());
+                }
+            });
 
-        // 2. Connect Provider (Cloud support)
-        const provider = new SupabaseProvider(ydoc, this.supabase, file.path, this.settings.vaultPassword);
+            // 2. Connect Provider (Cloud support)
+            const provider = new SupabaseProvider(ydoc, this.supabase, file.path, this.settings.vaultPassword);
+            
+            // Wait for provider to be ready
+            await new Promise<void>((resolve) => {
+                if (provider.isLoaded) {
+                    resolve();
+                } else {
+                    const checkLoaded = setInterval(() => {
+                        if (provider.isLoaded) {
+                            clearInterval(checkLoaded);
+                            resolve();
+                        }
+                    }, 100);
+                }
+            });
 
-        this.providers.set(editorView, { provider, persistence });
+            this.providers.set(file.path, { provider, persistence, editorView });
 
-        editorView.dispatch({
-            effects: this.collabCompartment.reconfigure(
-                yCollab(ytext, provider.awareness)
-            )
-        });
+            // Only reconfigure if we're still on the same file
+            const currentFile = this.app.workspace.getActiveFile();
+            if (currentFile?.path === file.path) {
+                editorView.dispatch({
+                    effects: this.collabCompartment.reconfigure(
+                        yCollab(ytext, provider.awareness)
+                    )
+                });
+                console.log(`✅ Sync enabled for ${file.path}`);
+            }
+        } catch (error) {
+            console.error(`❌ Failed to setup sync for ${file.path}:`, error);
+        } finally {
+            // Remove from pending
+            this.pendingConnections.delete(file.path);
+        }
+    }
+
+    cleanupProvider(filePath: string) {
+        const existing = this.providers.get(filePath);
+        if (existing) {
+            console.log(`🧹 Cleaning up provider for ${filePath}`);
+            existing.provider.destroy();
+            existing.persistence.destroy();
+            this.providers.delete(filePath);
+        }
     }
 
     onunload() {
         console.log('Unloading Atomic Sync plugin');
+        
+        // Cleanup all providers
+        for (const [path, { provider, persistence }] of this.providers.entries()) {
+            console.log(`Cleaning up provider for ${path}`);
+            provider.destroy();
+            persistence.destroy();
+        }
+        this.providers.clear();
+        this.pendingConnections.clear();
     }
 
     async loadSettings() {

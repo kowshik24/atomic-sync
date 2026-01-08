@@ -18,6 +18,7 @@ export class SupabaseProvider {
         this.path = path;
         this.awareness = new Awareness(doc);
 
+        // Initialize and connect automatically
         if (password) {
             this.initEncryption(password).then(() => {
                 this.connect();
@@ -26,6 +27,11 @@ export class SupabaseProvider {
             console.warn("No password provided, encryption disabled (NOT RECOMMENDED)");
             this.connect();
         }
+    }
+    
+    // Expose a method to check if provider is fully connected
+    isConnected(): boolean {
+        return this.isLoaded && this.channel !== null;
     }
 
     async initEncryption(password: string) {
