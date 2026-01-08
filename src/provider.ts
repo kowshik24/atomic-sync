@@ -170,12 +170,10 @@ export class SupabaseProvider {
             const currentContent = this.doc.getText('codemirror').toString();
             if (currentContent.length > 0) {
                 console.log(`📤 Auto-initializing: Pushing ${currentContent.length} characters to Supabase`);
-                // Create an update from the current state
-                const stateVector = Y.encodeStateVector(this.doc);
-                const update = Y.encodeStateAsUpdate(this.doc, stateVector);
+                // Create a FULL update from the current state (no state vector = full state)
+                const update = Y.encodeStateAsUpdate(this.doc);
                 
-                // Push it to Supabase (this will trigger handleUpdate via the update event)
-                // But we need to do it manually here to avoid the 'remote' origin check
+                // Push it to Supabase
                 await this.pushUpdate(update);
             }
         }
@@ -243,12 +241,13 @@ export class SupabaseProvider {
     async forceSync(): Promise<void> {
         console.log(`🔄 Force syncing ${this.path}...`);
         
-        const stateVector = Y.encodeStateVector(this.doc);
-        const update = Y.encodeStateAsUpdate(this.doc, stateVector);
+        // Create a FULL update (no state vector = full state)
+        const update = Y.encodeStateAsUpdate(this.doc);
+        const currentContent = this.doc.getText('codemirror').toString();
         
-        if (update.length > 0) {
+        if (currentContent.length > 0) {
             await this.pushUpdate(update);
-            console.log(`✅ Force sync completed for ${this.path}`);
+            console.log(`✅ Force sync completed for ${this.path} (${currentContent.length} chars)`);
         } else {
             console.log(`⚠️ No content to sync for ${this.path}`);
         }
