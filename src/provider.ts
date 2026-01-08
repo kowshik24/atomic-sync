@@ -85,40 +85,69 @@ export class SupabaseProvider {
 
         // 3. Apply Updates
         if (updates && updates.length > 0) {
-            this.doc.transact(async () => { // Transact to batch updates
-                for (const row of updates) {
-                    // Convert hex string to Uint8Array if necessary (Supabase returns bytea as hex string or buffer depending on client?)
-                    // The JS client usually returns a string for bytea (hex format) or standard buffer.
-                    // For now assuming we need to handle the data format.
-                    // Let's check typical Supabase return. It often returns a hex string for `bytea`.
-
-                    let blob = row.update_blob;
-                    if (typeof blob === 'string') {
-                        if (blob.startsWith('\\x')) blob = blob.substring(2);
-                        // Convert hex to Uint8Array
-                        const match = blob.match(/.{1,2}/g);
-                        if (match) {
-                            blob = new Uint8Array(match.map((byte: string) => parseInt(byte, 16)));
+            // Process and decrypt all updates BEFORE the transaction
+            const processedUpdates: Uint8Array[] = [];
+            
+            for (const row of updates) {
+                // The update_blob is stored as a base64 string (see handleUpdate method)
+                let blob: Uint8Array;
+                
+                if (typeof row.update_blob === 'string') {
+                    // Decode base64 to binary
+                    try {
+                        const binaryString = atob(row.update_blob);
+                        blob = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) {
+                            blob[i] = binaryString.charCodeAt(i);
                         }
+                    } catch (e) {
+                        console.error("Failed to decode base64 update_blob:", e);
+                        continue;
                     }
+                } else {
+                    // If it's already a Uint8Array or buffer
+                    blob = new Uint8Array(row.update_blob);
+                }
 
-                    if (this.encryptionKey) {
-                        // We need the IV. Where did we store it?
-                        // Ah, the design said: "update_blob" is the encrypted binary data. 
-                        // We need to pack the IV with the data or store it separately.
-                        // Common practice: Prepend IV to the cyphertext.
-                        // Let's assume the blob is [IV (12 bytes) + DEST (rest)]
-                        const iv = blob.slice(0, 12);
-                        const ciphertext = blob.slice(12);
-                        try {
-                            const decrypted = await decrypt(ciphertext, iv, this.encryptionKey);
-                            Y.applyUpdate(this.doc, decrypted);
-                        } catch (e) {
-                            console.error("Decryption failed for an update:", e);
-                        }
-                    } else {
-                        Y.applyUpdate(this.doc, new Uint8Array(blob));
+                if (this.encryptionKey) {
+                    // We need the IV. Where did we store it?
+                    // Ah, the design said: "update_blob" is the encrypted binary data. 
+                    // We need to pack the IV with the data or store it separately.
+                    // Common practice: Prepend IV to the cyphertext.
+                    // Let's assume the blob is [IV (12 bytes) + DEST (rest)]
+                    
+                    // Check if blob has enough data for IV
+                    if (blob.length < 12) {
+                        console.error(`Blob too short for IV: ${blob.length} bytes. Skipping update.`);
+                        continue;
                     }
+                    
+                    const iv = blob.slice(0, 12);
+                    const ciphertext = blob.slice(12);
+                    
+                    if (ciphertext.length === 0) {
+                        console.error("Empty ciphertext after extracting IV. Skipping update.");
+                        continue;
+                    }
+                    
+                    try {
+                        const decrypted = await decrypt(ciphertext, iv, this.encryptionKey);
+                        processedUpdates.push(decrypted);
+                    } catch (e) {
+                        console.error("❌ Decryption failed for an update:", e);
+                        console.error(`   - Blob length: ${blob.length}, IV length: ${iv.length}, Ciphertext length: ${ciphertext.length}`);
+                        console.error(`   - This may indicate the data was encrypted with a different password or is corrupted`);
+                        // Skip this update if decryption fails
+                    }
+                } else {
+                    processedUpdates.push(new Uint8Array(blob));
+                }
+            }
+            
+            // Apply all updates in a single synchronous transaction
+            this.doc.transact(() => {
+                for (const update of processedUpdates) {
+                    Y.applyUpdate(this.doc, update);
                 }
             }, 'remote'); // Origin 'remote' to avoid echoing back
         }
