@@ -175,8 +175,15 @@ export default class AtomicSyncPlugin extends Plugin {
             const ydocContentAfterIDB = ytext.toString();
             console.log(`📄 Y.Doc content after IndexedDB: ${ydocContentAfterIDB.length} characters`);
 
+            // Handle stale IndexedDB cache: If file is empty/new but IndexedDB has old content,
+            // clear the Y.Doc to start fresh (the file on disk is the source of truth for new files)
+            if (fileContent.length === 0 && ydocContentAfterIDB.length > 0) {
+                console.log(`🧹 Clearing stale IndexedDB cache for new file ${file.path}`);
+                // Clear the Y.Doc content
+                ytext.delete(0, ydocContentAfterIDB.length);
+            }
             // If Y.Doc is empty but file has content, initialize Y.Doc with file content
-            if (ydocContentAfterIDB.length === 0 && fileContent.length > 0) {
+            else if (ydocContentAfterIDB.length === 0 && fileContent.length > 0) {
                 console.log(`📝 Initializing Y.Doc with file content (${fileContent.length} chars)`);
                 ytext.insert(0, fileContent);
             }
