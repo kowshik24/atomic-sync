@@ -309,6 +309,10 @@ export class SupabaseProvider {
                     } catch (e) {
                         console.error("❌ Realtime decryption failed:", e);
                     }
+                } else {
+                    // No encryption, apply directly
+                    Y.applyUpdate(this.doc, binaryData, 'remote');
+                    console.log("✅ Realtime update applied (unencrypted)");
                 }
 
             })

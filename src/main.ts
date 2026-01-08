@@ -184,15 +184,22 @@ export default class AtomicSyncPlugin extends Plugin {
             // 2. Connect Provider (Cloud support)
             const provider = new SupabaseProvider(ydoc, this.supabase, file.path, this.settings.vaultPassword);
             
-            // Wait for provider to be ready
+            // Wait for provider to be ready (with timeout)
             await new Promise<void>((resolve) => {
                 if (provider.isLoaded) {
                     resolve();
                 } else {
+                    let attempts = 0;
+                    const maxAttempts = 100; // 10 seconds max
                     const checkLoaded = setInterval(() => {
+                        attempts++;
                         if (provider.isLoaded) {
                             clearInterval(checkLoaded);
                             resolve();
+                        } else if (attempts >= maxAttempts) {
+                            console.warn(`⚠️ Provider loading timed out for ${file.path}`);
+                            clearInterval(checkLoaded);
+                            resolve(); // Continue anyway
                         }
                     }, 100);
                 }
