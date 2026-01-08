@@ -56,6 +56,15 @@ export default class AtomicSyncPlugin extends Plugin {
             }
         });
 
+        // Add cleanup empty documents command
+        this.addCommand({
+            id: 'cleanup-empty-documents',
+            name: 'Clean up empty documents from Supabase',
+            callback: async () => {
+                await this.cleanupEmptyDocuments();
+            }
+        });
+
         // Register the compartment
         this.registerEditorExtension(this.collabCompartment.of([]));
 
@@ -329,6 +338,67 @@ export default class AtomicSyncPlugin extends Plugin {
         return await deriveKey(this.settings.vaultPassword);
     }
 
+    async cleanupEmptyDocuments() {
+        if (!this.supabase) {
+            new Notice('❌ Supabase not initialized');
+            return;
+        }
+
+        try {
+            console.log('🧹 Cleaning up empty documents from Supabase...');
+            new Notice('🧹 Scanning for empty documents...');
+
+            // Fetch all documents
+            const { data: documents, error: docError } = await this.supabase
+                .from('documents')
+                .select('id, path');
+
+            if (docError || !documents) {
+                console.error('Failed to fetch documents:', docError);
+                new Notice('❌ Failed to fetch documents');
+                return;
+            }
+
+            let deletedCount = 0;
+
+            // Check each document for updates
+            for (const doc of documents) {
+                const { data: updates, error: updateError } = await this.supabase
+                    .from('updates')
+                    .select('id')
+                    .eq('document_id', doc.id)
+                    .limit(1);
+
+                if (updateError) {
+                    console.error(`Error checking updates for ${doc.path}:`, updateError);
+                    continue;
+                }
+
+                // If no updates, delete the document
+                if (!updates || updates.length === 0) {
+                    console.log(`🗑️ Deleting empty document: ${doc.path}`);
+                    
+                    const { error: deleteError } = await this.supabase
+                        .from('documents')
+                        .delete()
+                        .eq('id', doc.id);
+
+                    if (deleteError) {
+                        console.error(`Failed to delete ${doc.path}:`, deleteError);
+                    } else {
+                        deletedCount++;
+                    }
+                }
+            }
+
+            console.log(`✅ Cleanup complete: deleted ${deletedCount} empty document(s)`);
+            new Notice(`✅ Deleted ${deletedCount} empty document(s)`);
+        } catch (error) {
+            console.error('Error during cleanup:', error);
+            new Notice('❌ Cleanup failed');
+        }
+    }
+
     async discoverAndSyncFiles(showNotification = true) {
         if (!this.supabase) {
             console.log('Supabase not initialized');
@@ -372,20 +442,25 @@ export default class AtomicSyncPlugin extends Plugin {
                 if (!file) {
                     // File doesn't exist locally, create it with content from Supabase
                     try {
-                        console.log(`📥 Creating missing file: ${filePath}`);
+                        console.log(`📥 Checking file: ${filePath}`);
                         
                         // Fetch content from Supabase
                         const content = await this.fetchFileContent(filePath);
+                        
+                        // Skip empty files (orphaned/temporary files with no content)
+                        if (content.length === 0) {
+                            console.log(`⏭️ Skipping empty file: ${filePath}`);
+                            continue;
+                        }
+                        
+                        console.log(`📥 Creating file: ${filePath}`);
                         
                         // Create the file with the fetched content
                         await this.app.vault.create(filePath, content);
                         
                         createdCount++;
                         newFiles.push(filePath);
-                        
-                        if (content.length > 0) {
-                            console.log(`  ✓ Created with ${content.length} characters`);
-                        }
+                        console.log(`  ✓ Created with ${content.length} characters`);
                     } catch (createError) {
                         console.error(`Failed to create file ${filePath}:`, createError);
                     }
