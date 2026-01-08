@@ -213,12 +213,18 @@ export class SupabaseProvider {
 
                 // Decrypt and Apply
                 if (this.encryptionKey) {
-                    const iv = blob.slice(0, 12);
-                    const ciphertext = blob.slice(12);
                     try {
+                        const iv = blob.slice(0, 12);
+                        const ciphertext = blob.slice(12);
                         const decrypted = await decrypt(ciphertext, iv, this.encryptionKey);
                         Y.applyUpdate(this.doc, decrypted, 'remote');
-                    } catch (e) { console.error(e) }
+                        console.log("✅ Realtime update applied");
+                    } catch (e) {
+                        console.error("❌ Realtime decryption failed:", e);
+                        console.error("Blob type:", typeof blob);
+                        console.error("Blob length:", blob.length);
+                        console.error("First 20 bytes:", blob.slice(0, 20));
+                    }
                 }
 
             })
