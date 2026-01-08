@@ -91,6 +91,7 @@ export class SupabaseProvider {
 
         // 3. Apply Updates
         if (updates && updates.length > 0) {
+            console.log(`📥 Fetched ${updates.length} updates from Supabase for ${this.path}`);
             // Process and decrypt all updates BEFORE the transaction
             const processedUpdates: Uint8Array[] = [];
             
@@ -151,14 +152,22 @@ export class SupabaseProvider {
             }
             
             // Apply all updates in a single synchronous transaction
-            this.doc.transact(() => {
-                for (const update of processedUpdates) {
-                    Y.applyUpdate(this.doc, update);
-                }
-            }, 'remote'); // Origin 'remote' to avoid echoing back
+            if (processedUpdates.length > 0) {
+                console.log(`✅ Applying ${processedUpdates.length} decrypted updates for ${this.path}`);
+                this.doc.transact(() => {
+                    for (const update of processedUpdates) {
+                        Y.applyUpdate(this.doc, update);
+                    }
+                }, 'remote'); // Origin 'remote' to avoid echoing back
+            } else {
+                console.warn(`⚠️ No valid updates to apply for ${this.path} (${updates.length} fetched, but all failed decryption)`);
+            }
+        } else {
+            console.log(`📭 No updates found in Supabase for ${this.path}`);
         }
 
         this.isLoaded = true;
+        console.log(`✅ Sync completed for ${this.path}`);
     }
 
     async handleUpdate(update: Uint8Array, origin: any) {

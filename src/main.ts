@@ -98,6 +98,10 @@ export default class AtomicSyncPlugin extends Plugin {
             const ydoc = new Y.Doc();
             const ytext = ydoc.getText('codemirror');
 
+            // Get current editor content
+            const currentContent = editorView.state.doc.toString();
+            console.log(`📄 Current editor content length: ${currentContent.length} characters`);
+
             // 1. Connect Persistence (Offline support)
             const persistence = new IndexeddbPersistence(file.path, ydoc);
             
@@ -106,9 +110,22 @@ export default class AtomicSyncPlugin extends Plugin {
                 if (persistence.synced) {
                     resolve();
                 } else {
-                    persistence.once('synced', () => resolve());
+                    persistence.once('synced', () => {
+                        console.log(`💾 IndexedDB synced for ${file.path}`);
+                        resolve();
+                    });
                 }
             });
+
+            // Check if Y.Doc is empty after IndexedDB sync
+            const ydocContentAfterIDB = ytext.toString();
+            console.log(`📄 Y.Doc content after IndexedDB: ${ydocContentAfterIDB.length} characters`);
+
+            // If Y.Doc is empty but editor has content, initialize Y.Doc with editor content
+            if (ydocContentAfterIDB.length === 0 && currentContent.length > 0) {
+                console.log(`📝 Initializing Y.Doc with current editor content`);
+                ytext.insert(0, currentContent);
+            }
 
             // 2. Connect Provider (Cloud support)
             const provider = new SupabaseProvider(ydoc, this.supabase, file.path, this.settings.vaultPassword);
@@ -126,6 +143,9 @@ export default class AtomicSyncPlugin extends Plugin {
                     }, 100);
                 }
             });
+
+            const finalContent = ytext.toString();
+            console.log(`📄 Final Y.Doc content after sync: ${finalContent.length} characters`);
 
             this.providers.set(file.path, { provider, persistence, editorView });
 
