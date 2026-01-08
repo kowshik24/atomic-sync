@@ -157,12 +157,13 @@ export class SupabaseProvider {
                 return;
             }
 
-            // Convert Uint8Array to Hex string for postgres bytea
-            const hexBlob = '0x' + Array.from(blobToSend).map(b => b.toString(16).padStart(2, '0')).join('');
+            // Convert Uint8Array to Base64 string for simple, reliable transport
+            // We use a helper function to avoid stack overflow with large arrays
+            const base64Blob = this.toBase64(blobToSend);
 
             const { error: insertError } = await this.supabase.from('updates').insert({
                 document_id: docData.id,
-                update_blob: hexBlob
+                update_blob: base64Blob
             });
 
             if (insertError) {
@@ -200,30 +201,36 @@ export class SupabaseProvider {
 
                 // It's for us!
                 let blob = payload.new.update_blob;
-                // Convert from hex string
-                if (typeof blob === 'string') {
-                    if (blob.startsWith('\\x')) blob = blob.substring(2); // Postgres output format sometimes
-                    else if (blob.startsWith('0x')) blob = blob.substring(2);
 
-                    const match = blob.match(/.{1,2}/g);
-                    if (match) {
-                        blob = new Uint8Array(match.map((byte: string) => parseInt(byte, 16)));
+                // DATA IS BASE64 STRING
+                let binaryData: Uint8Array;
+                try {
+                    // Check if it's already a string (Supabase returns text column as string)
+                    if (typeof blob !== 'string') {
+                        console.warn("Unexpected blob type:", typeof blob);
+                        return;
                     }
+
+                    const binaryString = atob(blob);
+                    binaryData = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        binaryData[i] = binaryString.charCodeAt(i);
+                    }
+                } catch (e) {
+                    console.error("Failed to decode base64:", e);
+                    return;
                 }
 
                 // Decrypt and Apply
                 if (this.encryptionKey) {
                     try {
-                        const iv = blob.slice(0, 12);
-                        const ciphertext = blob.slice(12);
+                        const iv = binaryData.slice(0, 12);
+                        const ciphertext = binaryData.slice(12);
                         const decrypted = await decrypt(ciphertext, iv, this.encryptionKey);
                         Y.applyUpdate(this.doc, decrypted, 'remote');
                         console.log("✅ Realtime update applied");
                     } catch (e) {
                         console.error("❌ Realtime decryption failed:", e);
-                        console.error("Blob type:", typeof blob);
-                        console.error("Blob length:", blob.length);
-                        console.error("First 20 bytes:", blob.slice(0, 20));
                     }
                 }
 
@@ -232,6 +239,15 @@ export class SupabaseProvider {
     }
 
     docIdCached: string | null = null;
+
+    toBase64(bytes: Uint8Array) {
+        let binary = '';
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
 
     destroy() {
         if (this.channel) this.supabase.removeChannel(this.channel);
