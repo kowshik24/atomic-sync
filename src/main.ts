@@ -1,99 +1,102 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Plugin, WorkspaceLeaf, TFile, MarkdownView } from 'obsidian';
+import { SupabaseProvider } from './provider';
+import { AtomicSyncSettings, DEFAULT_SETTINGS, AtomicSyncSettingTab } from './settings';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import * as Y from 'yjs';
+import { yCollab } from 'y-codemirror.next';
+import { Compartment } from '@codemirror/state';
+import { EditorView } from '@codemirror/view';
+import { IndexeddbPersistence } from 'y-indexeddb';
 
-// Remember to rename these classes and interfaces!
+export default class AtomicSyncPlugin extends Plugin {
+    settings: AtomicSyncSettings;
+    supabase: SupabaseClient;
+    collabCompartment = new Compartment();
+    // Keep track of active connections
+    providers = new WeakMap<EditorView, { provider: SupabaseProvider, persistence: IndexeddbPersistence }>();
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+    async onload() {
+        console.log('Loading Atomic Sync plugin');
 
-	async onload() {
-		await this.loadSettings();
+        await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
+        this.addSettingTab(new AtomicSyncSettingTab(this.app, this));
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
+        // Initialize Supabase if settings exist
+        if (this.settings.supabaseUrl && this.settings.supabaseKey) {
+            this.initSupabase();
+        }
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+        // Register the compartment
+        this.registerEditorExtension(this.collabCompartment.of([]));
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			}
-		});
+        // Listen for file opening
+        this.registerEvent(
+            this.app.workspace.on('file-open', this.handleFileOpen.bind(this))
+        );
+    }
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+    initSupabase() {
+        if (!this.settings.supabaseUrl || !this.settings.supabaseKey) {
+            console.log("Supabase credentials not configured yet");
+            return;
+        }
+        try {
+            this.supabase = createClient(this.settings.supabaseUrl, this.settings.supabaseKey);
+            console.log("Supabase client initialized successfully");
+        } catch (e) {
+            console.error("Failed to init Supabase client", e);
+        }
+    }
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
+    async handleFileOpen(file: TFile | null) {
+        if (!file) return;
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view) return;
 
-	}
+        const editorView = (view.editor as any).cm as EditorView;
+        if (!editorView) return;
 
-	onunload() {
-	}
+        // Cleanup old
+        const old = this.providers.get(editorView);
+        if (old) {
+            old.provider.destroy();
+            old.persistence.destroy();
+            this.providers.delete(editorView);
+        }
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
-	}
+        if (!this.supabase || !this.settings.vaultPassword) return;
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
+        // Initialize Yjs
+        const ydoc = new Y.Doc();
+        const ytext = ydoc.getText('codemirror');
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+        // 1. Connect Persistence (Offline support)
+        const persistence = new IndexeddbPersistence(file.path, ydoc);
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+        // 2. Connect Provider (Cloud support)
+        const provider = new SupabaseProvider(ydoc, this.supabase, file.path, this.settings.vaultPassword);
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+        this.providers.set(editorView, { provider, persistence });
+
+        editorView.dispatch({
+            effects: this.collabCompartment.reconfigure(
+                yCollab(ytext, provider.awareness)
+            )
+        });
+    }
+
+    onunload() {
+        console.log('Unloading Atomic Sync plugin');
+    }
+
+    async loadSettings() {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings);
+        this.initSupabase();
+    }
 }
