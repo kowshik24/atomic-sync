@@ -67,13 +67,17 @@ export default class AtomicSyncPlugin extends Plugin {
         // Cleanup providers when file is closed/modified externally
         this.registerEvent(
             this.app.vault.on('delete', (file) => {
-                this.cleanupProvider(file.path);
+                if (file instanceof TFile) {
+                    this.cleanupProvider(file.path);
+                }
             })
         );
         
         this.registerEvent(
-            this.app.vault.on('rename', (file, oldPath) => {
-                this.cleanupProvider(oldPath);
+            this.app.vault.on('rename', async (file, oldPath) => {
+                if (file instanceof TFile) {
+                    await this.handleFileRename(file, oldPath);
+                }
             })
         );
 
@@ -407,6 +411,50 @@ export default class AtomicSyncPlugin extends Plugin {
                 new Notice('❌ Error discovering files');
             }
         }
+    }
+
+    async handleFileRename(file: TFile, oldPath: string) {
+        console.log(`📝 File renamed: ${oldPath} → ${file.path}`);
+        
+        // Cleanup old provider
+        this.cleanupProvider(oldPath);
+        
+        // Update path in Supabase
+        if (this.supabase) {
+            try {
+                const { data: docData, error: findError } = await this.supabase
+                    .from('documents')
+                    .select('id')
+                    .eq('path', oldPath)
+                    .maybeSingle();
+                
+                if (findError) {
+                    console.error('Error finding document for rename:', findError);
+                    return;
+                }
+                
+                if (docData) {
+                    // Update the path in the documents table
+                    const { error: updateError } = await this.supabase
+                        .from('documents')
+                        .update({ path: file.path })
+                        .eq('id', docData.id);
+                    
+                    if (updateError) {
+                        console.error('Error updating document path:', updateError);
+                    } else {
+                        console.log(`✅ Updated document path in Supabase: ${oldPath} → ${file.path}`);
+                    }
+                } else {
+                    console.log(`No document found in Supabase for ${oldPath}`);
+                }
+            } catch (error) {
+                console.error('Error handling rename in Supabase:', error);
+            }
+        }
+        
+        // Open the file to trigger sync with new path
+        // (This happens automatically if the file is currently open)
     }
 
     cleanupProvider(filePath: string) {
